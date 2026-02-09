@@ -38,6 +38,33 @@ type ProvenanceOpts struct {
 type BuilderOpts struct {
 	// ExpectedBuilderID is the builderID passed in from the user.
 	ExpectedID *string
+
+	// CustomOpts contains options for the custom verifier.
+	// When set, the custom verifier is used instead of the default GHA verifier.
+	CustomOpts *CustomVerifierOpts
+}
+
+// CustomVerifierOpts contains options for verifying provenance from non-GitHub
+// build systems that use their own Sigstore infrastructure.
+type CustomVerifierOpts struct {
+	// OidcIssuer is the expected OIDC issuer URL in the signing certificate.
+	OidcIssuer *string
+
+	// CertificateIdentityRegexp is a regexp pattern for validating the
+	// certificate's SAN (Subject Alternative Name).
+	CertificateIdentityRegexp *string
+
+	// BuildType is the expected build type URL in the provenance.
+	BuildType *string
+
+	// TrustedRootPath is the path to a local Sigstore trusted_root.json file.
+	TrustedRootPath *string
+
+	// TufRootURL is the URL of a custom TUF repository for fetching the trusted root.
+	TufRootURL *string
+
+	// SourceURIPrefix is the required prefix for source URIs in the provenance.
+	SourceURIPrefix *string
 }
 
 // VSAOpts are the options for checking the VSA.

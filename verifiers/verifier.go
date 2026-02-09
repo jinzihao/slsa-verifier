@@ -7,6 +7,7 @@ import (
 	serrors "github.com/slsa-framework/slsa-verifier/v2/errors"
 	"github.com/slsa-framework/slsa-verifier/v2/options"
 	"github.com/slsa-framework/slsa-verifier/v2/register"
+	_ "github.com/slsa-framework/slsa-verifier/v2/verifiers/internal/custom"
 	_ "github.com/slsa-framework/slsa-verifier/v2/verifiers/internal/gcb"
 	"github.com/slsa-framework/slsa-verifier/v2/verifiers/internal/gha"
 	"github.com/slsa-framework/slsa-verifier/v2/verifiers/internal/vsa"
@@ -14,10 +15,24 @@ import (
 )
 
 func getVerifier(builderOpts *options.BuilderOpts) (register.SLSAVerifier, error) {
+	// If custom verifier options are provided, use the custom verifier.
+	if builderOpts.CustomOpts != nil && builderOpts.CustomOpts.OidcIssuer != nil {
+		v, ok := register.SLSAVerifiers["CUSTOM"]
+		if !ok {
+			return nil, fmt.Errorf("custom verifier not registered")
+		}
+		// Validate that trust root configuration is provided.
+		if (builderOpts.CustomOpts.TrustedRootPath == nil || *builderOpts.CustomOpts.TrustedRootPath == "") &&
+			(builderOpts.CustomOpts.TufRootURL == nil || *builderOpts.CustomOpts.TufRootURL == "") {
+			return nil, fmt.Errorf("--trusted-root or --tuf-root-url is required when using --oidc-issuer")
+		}
+		return v, nil
+	}
+
 	// By default, use the GHA builders
 	verifier := register.SLSAVerifiers[gha.VerifierName]
 
-	// If user provids a builderID, find the right verifier based on its ID.
+	// If user provides a builderID, find the right verifier based on its ID.
 	if builderOpts.ExpectedID != nil &&
 		*builderOpts.ExpectedID != "" {
 		name, _, err := utils.ParseBuilderID(*builderOpts.ExpectedID, false)

@@ -41,6 +41,13 @@ type VerifyOptions struct {
 	ProvenancePath       string
 	ProvenanceRepository string
 	PrintProvenance      bool
+	/* Custom verifier options (for non-GitHub build systems) */
+	OidcIssuer                string
+	CertificateIdentityRegexp string
+	BuildType                 string
+	TrustedRootPath           string
+	TufRootURL                string
+	SourceURIPrefix           string
 }
 
 var _ Interface = (*VerifyOptions)(nil)
@@ -76,6 +83,27 @@ func (o *VerifyOptions) AddFlags(cmd *cobra.Command) {
 
 	cmd.MarkFlagRequired("source-uri")
 	cmd.MarkFlagsMutuallyExclusive("source-versioned-tag", "source-tag")
+
+	/* Custom verifier options */
+	cmd.Flags().StringVar(&o.OidcIssuer, "oidc-issuer", "",
+		"[optional] custom OIDC issuer URL for certificate validation (triggers custom verifier)")
+
+	cmd.Flags().StringVar(&o.CertificateIdentityRegexp, "certificate-identity-regexp", "",
+		"[optional] regexp pattern for certificate subject (SAN) validation")
+
+	cmd.Flags().StringVar(&o.BuildType, "build-type", "",
+		"[optional] expected build type URL for the custom builder")
+
+	cmd.Flags().StringVar(&o.TrustedRootPath, "trusted-root", "",
+		"[optional] path to a local Sigstore trusted_root.json file")
+
+	cmd.Flags().StringVar(&o.TufRootURL, "tuf-root-url", "",
+		"[optional] URL of a custom TUF repository for trusted root")
+
+	cmd.Flags().StringVar(&o.SourceURIPrefix, "source-uri-prefix", "",
+		"[optional] required prefix for source URIs (e.g. git+https://example.com/)")
+
+	cmd.MarkFlagsMutuallyExclusive("trusted-root", "tuf-root-url")
 }
 
 // VerifyNpmOptions is the top-level options for the `verifyNpmPackage` command.

@@ -35,6 +35,7 @@ type VerifyArtifactCommand struct {
 	SourceVersionTag    *string
 	BuildWorkflowInputs map[string]string
 	PrintProvenance     bool
+	CustomOpts          *options.CustomVerifierOpts
 }
 
 func (c *VerifyArtifactCommand) Exec(ctx context.Context, artifacts []string) (*utils.TrustedBuilderID, error) {
@@ -58,6 +59,7 @@ func (c *VerifyArtifactCommand) Exec(ctx context.Context, artifacts []string) (*
 
 		builderOpts := &options.BuilderOpts{
 			ExpectedID: c.BuilderID,
+			CustomOpts: c.CustomOpts,
 		}
 
 		provenance, err := os.ReadFile(c.ProvenancePath)

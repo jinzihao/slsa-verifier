@@ -20,6 +20,7 @@ import (
 	"os"
 
 	"github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier/verify"
+	"github.com/slsa-framework/slsa-verifier/v2/options"
 	"github.com/spf13/cobra"
 )
 
@@ -58,6 +59,28 @@ func verifyArtifactCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("builder-id") {
 				v.BuilderID = &o.BuilderID
+			}
+
+			// Build custom verifier options if any custom flags are set.
+			if cmd.Flags().Changed("oidc-issuer") {
+				customOpts := &options.CustomVerifierOpts{}
+				customOpts.OidcIssuer = &o.OidcIssuer
+				if cmd.Flags().Changed("certificate-identity-regexp") {
+					customOpts.CertificateIdentityRegexp = &o.CertificateIdentityRegexp
+				}
+				if cmd.Flags().Changed("build-type") {
+					customOpts.BuildType = &o.BuildType
+				}
+				if cmd.Flags().Changed("trusted-root") {
+					customOpts.TrustedRootPath = &o.TrustedRootPath
+				}
+				if cmd.Flags().Changed("tuf-root-url") {
+					customOpts.TufRootURL = &o.TufRootURL
+				}
+				if cmd.Flags().Changed("source-uri-prefix") {
+					customOpts.SourceURIPrefix = &o.SourceURIPrefix
+				}
+				v.CustomOpts = customOpts
 			}
 
 			if _, err := v.Exec(cmd.Context(), args); err != nil {
