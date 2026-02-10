@@ -39,11 +39,6 @@ func (v *CustomVerifier) VerifyArtifact(ctx context.Context,
 		return nil, nil, fmt.Errorf("%w: custom verifier requires --oidc-issuer", serrors.ErrorInvalidOIDCIssuer)
 	}
 
-	// Only Sigstore bundle format is supported.
-	if !isSigstoreBundle(provenance) {
-		return nil, nil, fmt.Errorf("custom verifier only supports Sigstore bundle format provenance")
-	}
-
 	// Load custom trusted root.
 	trustedMaterial, err := utils.GetCustomTrustedRoot(customOpts.TrustedRootPath, customOpts.TufRootURL)
 	if err != nil {
@@ -56,9 +51,20 @@ func (v *CustomVerifier) VerifyArtifact(ctx context.Context,
 		certIdentityRegexp = *customOpts.CertificateIdentityRegexp
 	}
 
-	// Verify the bundle: rekor entry, certificate chain, SCTs, identity, DSSE signature.
-	signedAtt, err := verifyProvenanceBundle(ctx, provenance, trustedMaterial,
-		*customOpts.OidcIssuer, certIdentityRegexp)
+	var signedAtt *signedAttestation
+	if isSigstoreBundle(provenance) {
+		// Verify the bundle: rekor entry, certificate chain, SCTs, identity, DSSE signature.
+		signedAtt, err = verifyProvenanceBundle(ctx, provenance, trustedMaterial,
+			*customOpts.OidcIssuer, certIdentityRegexp)
+	} else {
+		// Non-bundle path: search Rekor online using the custom trusted root.
+		rClient, clientErr := getRekorClient(trustedMaterial)
+		if clientErr != nil {
+			return nil, nil, fmt.Errorf("creating Rekor client: %w", clientErr)
+		}
+		signedAtt, err = verifyProvenanceSignature(ctx, trustedMaterial, rClient,
+			provenance, artifactHash, *customOpts.OidcIssuer, certIdentityRegexp)
+	}
 	if err != nil {
 		return nil, nil, err
 	}

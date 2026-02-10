@@ -11,23 +11,41 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"slices"
+	"strings"
 	"time"
 
 	cjson "github.com/docker/go/canonical/json"
+	goapiruntime "github.com/go-openapi/runtime"
 	dsselib "github.com/secure-systems-lab/go-securesystemslib/dsse"
 	bundle_v1 "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	proto_v1 "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
 	v1 "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
+	rekorClient "github.com/sigstore/rekor/pkg/client"
+	rekorGenClient "github.com/sigstore/rekor/pkg/generated/client"
+	"github.com/sigstore/rekor/pkg/generated/client/entries"
+	"github.com/sigstore/rekor/pkg/generated/client/index"
 	"github.com/sigstore/rekor/pkg/generated/models"
+	"github.com/sigstore/rekor/pkg/sharding"
+	"github.com/sigstore/rekor/pkg/types"
+	"github.com/sigstore/rekor/pkg/types/dsse"
+	dsse_v001 "github.com/sigstore/rekor/pkg/types/dsse/v0.0.1"
+	"github.com/sigstore/rekor/pkg/types/intoto"
+	intoto_v001 "github.com/sigstore/rekor/pkg/types/intoto/v0.0.1"
 	rverify "github.com/sigstore/rekor/pkg/verify"
 	sigstoreFulcioCertificate "github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	sigstoreRoot "github.com/sigstore/sigstore-go/pkg/root"
 	sigstoreVerify "github.com/sigstore/sigstore-go/pkg/verify"
+	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/sigstore/sigstore/pkg/signature"
 	dsseverifier "github.com/sigstore/sigstore/pkg/signature/dsse"
+	"github.com/slsa-framework/slsa-github-generator/signing/envelope"
 	serrors "github.com/slsa-framework/slsa-verifier/v2/errors"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"sigs.k8s.io/release-utils/version"
 )
 
 // signedAttestation contains a signed DSSE envelope
@@ -347,4 +365,300 @@ func isSigstoreBundle(b []byte) bool {
 		return false
 	}
 	return true
+}
+
+// --- Non-bundle verification path (legacy DSSE envelope with Rekor search) ---
+
+// getRekorClient creates a Rekor client using the base URL from the trusted
+// material's Rekor log entries. Falls back to the default public Rekor if
+// no log entries are found.
+func getRekorClient(trustedMaterial sigstoreRoot.TrustedMaterial) (*rekorGenClient.Rekor, error) {
+	rekorAddr := "https://rekor.sigstore.dev"
+	rekorLogs := trustedMaterial.RekorLogs()
+	for _, log := range rekorLogs {
+		if log.BaseURL != "" {
+			rekorAddr = log.BaseURL
+			break
+		}
+	}
+	userAgent := fmt.Sprintf("slsa-verifier/%s (%s; %s)", version.GetVersionInfo().GitVersion, runtime.GOOS, runtime.GOARCH)
+	return rekorClient.GetRekorClient(rekorAddr, rekorClient.WithUserAgent(userAgent))
+}
+
+// verifyProvenanceSignature verifies the DSSE envelope using online Rekor
+// search, for non-bundle provenance format.
+func verifyProvenanceSignature(ctx context.Context,
+	trustedMaterial sigstoreRoot.TrustedMaterial,
+	rClient *rekorGenClient.Rekor,
+	provenance []byte, artifactHash string,
+	oidcIssuer, certIdentityRegexp string,
+) (*signedAttestation, error) {
+	if hasCertInEnvelope(provenance) {
+		return getValidSignedAttestationWithCert(ctx, rClient, provenance,
+			trustedMaterial, oidcIssuer, certIdentityRegexp)
+	}
+
+	fmt.Fprintf(os.Stderr, "No certificate provided, trying Redis search index to find entries by subject digest\n")
+	return searchValidSignedAttestation(ctx, artifactHash, provenance,
+		rClient, trustedMaterial, oidcIssuer, certIdentityRegexp)
+}
+
+// hasCertInEnvelope checks if a valid x509 certificate is present in the envelope.
+func hasCertInEnvelope(provenance []byte) bool {
+	certPem, err := envelope.GetCertFromEnvelope(provenance)
+	return err == nil && len(certPem) > 0
+}
+
+// getValidSignedAttestationWithCert finds and validates matching Rekor entry UUIDs
+// using the certificate embedded in the DSSE envelope.
+func getValidSignedAttestationWithCert(ctx context.Context,
+	rClient *rekorGenClient.Rekor,
+	provenance []byte,
+	trustedMaterial sigstoreRoot.TrustedMaterial,
+	oidcIssuer, certIdentityRegexp string,
+) (*signedAttestation, error) {
+	params := entries.NewSearchLogQueryParams()
+	searchLogQuery := models.SearchLogQuery{}
+	certPem, err := envelope.GetCertFromEnvelope(provenance)
+	if err != nil {
+		return nil, fmt.Errorf("error getting certificate from provenance: %w", err)
+	}
+
+	intotoEntry, err := newIntotoEntry(certPem, provenance)
+	if err != nil {
+		return nil, fmt.Errorf("error creating intoto entry: %w", err)
+	}
+	dsseEntry, err := newDsseEntry(certPem, provenance)
+	if err != nil {
+		return nil, err
+	}
+	searchLogQuery.SetEntries([]models.ProposedEntry{intotoEntry, dsseEntry})
+
+	params.SetEntry(&searchLogQuery)
+	resp, err := rClient.Entries.SearchLogQuery(params)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", serrors.ErrorRekorSearch, err.Error())
+	}
+
+	if len(resp.GetPayload()) != 1 {
+		return nil, fmt.Errorf("%w: %s", serrors.ErrorRekorSearch, "no matching rekor entries")
+	}
+
+	logEntry := resp.Payload[0]
+	var rekorEntry models.LogEntryAnon
+	for uuid, e := range logEntry {
+		if _, err := verifyTlogEntry(ctx, e, true, trustedMaterial); err != nil {
+			return nil, fmt.Errorf("error verifying tlog entry: %w", err)
+		}
+		rekorEntry = e
+		fmt.Fprintf(os.Stderr, "Verified signature against tlog entry index %d at UUID: %s\n", *e.LogIndex, uuid)
+	}
+
+	certs, err := cryptoutils.UnmarshalCertificatesFromPEM(certPem)
+	if err != nil {
+		return nil, err
+	}
+	if len(certs) != 1 {
+		return nil, fmt.Errorf("error unmarshaling certificate from pem")
+	}
+
+	env, err := envelopeFromBytes(provenance)
+	if err != nil {
+		return nil, err
+	}
+
+	proposedSignedAtt := &signedAttestation{
+		SigningCert: certs[0],
+		Envelope:    env,
+		RekorEntry:  &rekorEntry,
+	}
+
+	if err := verifySignedAttestation(proposedSignedAtt, trustedMaterial, oidcIssuer, certIdentityRegexp); err != nil {
+		return nil, err
+	}
+
+	return proposedSignedAtt, nil
+}
+
+// searchValidSignedAttestation searches for a valid signing certificate using
+// the Rekor search index by artifact digest.
+func searchValidSignedAttestation(ctx context.Context,
+	artifactHash string, provenance []byte,
+	rClient *rekorGenClient.Rekor,
+	trustedMaterial sigstoreRoot.TrustedMaterial,
+	oidcIssuer, certIdentityRegexp string,
+) (*signedAttestation, error) {
+	uuids, err := getUUIDsByArtifactDigest(rClient, artifactHash)
+	if err != nil {
+		return nil, err
+	}
+
+	env, err := envelopeFromBytes(provenance)
+	if err != nil {
+		return nil, err
+	}
+
+	var errs []string
+	for _, uuid := range uuids {
+		entry, err := verifyTlogEntryByUUID(ctx, rClient, uuid, trustedMaterial)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: verifying tlog entry %s", err, uuid))
+			continue
+		}
+
+		cert, err := extractCert(entry)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: extracting certificate from %s", err, uuid))
+			continue
+		}
+
+		proposedSignedAtt := &signedAttestation{
+			Envelope:   env,
+			SigningCert: cert,
+			RekorEntry: entry,
+		}
+
+		err = verifySignedAttestation(proposedSignedAtt, trustedMaterial, oidcIssuer, certIdentityRegexp)
+		if errors.Is(err, serrors.ErrorInternal) {
+			return nil, err
+		} else if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+
+		fmt.Fprintf(os.Stderr, "Verified signature against tlog entry index %d at UUID: %s\n", *entry.LogIndex, uuid)
+		return proposedSignedAtt, nil
+	}
+
+	return nil, fmt.Errorf("%w: got unexpected errors %s", serrors.ErrorNoValidRekorEntries, strings.Join(errs, ", "))
+}
+
+// verifyTlogEntryByUUID fetches and verifies a single Rekor tlog entry by UUID.
+func verifyTlogEntryByUUID(ctx context.Context, client *rekorGenClient.Rekor,
+	entryUUID string, trustedMaterial sigstoreRoot.TrustedMaterial,
+) (*models.LogEntryAnon, error) {
+	params := entries.NewGetLogEntryByUUIDParamsWithContext(ctx)
+	params.EntryUUID = entryUUID
+
+	lep, err := client.Entries.GetLogEntryByUUID(params)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(lep.Payload) != 1 {
+		return nil, errors.New("UUID value can not be extracted")
+	}
+
+	uuid, err := sharding.GetUUIDFromIDString(params.EntryUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	for k, entry := range lep.Payload {
+		returnUUID, err := sharding.GetUUIDFromIDString(k)
+		if err != nil {
+			return nil, err
+		}
+		if returnUUID != uuid {
+			return nil, errors.New("expected matching UUID")
+		}
+		return verifyTlogEntry(ctx, entry, true, trustedMaterial)
+	}
+
+	return nil, serrors.ErrorRekorSearch
+}
+
+// getUUIDsByArtifactDigest finds all entry UUIDs by the digest of the artifact binary.
+func getUUIDsByArtifactDigest(rClient *rekorGenClient.Rekor, artifactHash string) ([]string, error) {
+	params := index.NewSearchIndexParams()
+	params.Query = &models.SearchIndex{Hash: fmt.Sprintf("sha256:%v", artifactHash)}
+	resp, err := rClient.Index.SearchIndex(params)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", serrors.ErrorRekorSearch, err.Error())
+	}
+
+	if len(resp.Payload) == 0 {
+		return nil, fmt.Errorf("%w: no matching entries found", serrors.ErrorRekorSearch)
+	}
+
+	return resp.GetPayload(), nil
+}
+
+// extractCert extracts the signing certificate from a Rekor log entry.
+func extractCert(e *models.LogEntryAnon) (*x509.Certificate, error) {
+	b, err := base64.StdEncoding.DecodeString(e.Body.(string))
+	if err != nil {
+		return nil, err
+	}
+
+	pe, err := models.UnmarshalProposedEntry(bytes.NewReader(b), goapiruntime.JSONConsumer())
+	if err != nil {
+		return nil, err
+	}
+
+	eimpl, err := types.UnmarshalEntry(pe)
+	if err != nil {
+		return nil, err
+	}
+
+	var publicKeyB64 []byte
+	switch e := eimpl.(type) {
+	case *intoto_v001.V001Entry:
+		publicKeyB64, err = e.IntotoObj.PublicKey.MarshalText()
+	case *dsse_v001.V001Entry:
+		if len(e.DSSEObj.Signatures) > 1 {
+			return nil, errors.New("multiple signatures on DSSE envelopes are not currently supported")
+		}
+		publicKeyB64, err = e.DSSEObj.Signatures[0].Verifier.MarshalText()
+	default:
+		return nil, errors.New("unexpected tlog entry type")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	publicKey, err := base64.StdEncoding.DecodeString(string(publicKeyB64))
+	if err != nil {
+		return nil, err
+	}
+
+	certs, err := cryptoutils.UnmarshalCertificatesFromPEM(publicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(certs) != 1 {
+		return nil, errors.New("unexpected number of cert pem tlog entry")
+	}
+
+	return certs[0], err
+}
+
+// newIntotoEntry creates a ProposedEntry for intoto format.
+func newIntotoEntry(certPem, provenance []byte) (models.ProposedEntry, error) {
+	if len(certPem) == 0 {
+		return nil, fmt.Errorf("no signing certificate found in intoto envelope")
+	}
+	return types.NewProposedEntry(context.Background(), intoto.KIND, intoto_v001.APIVERSION, types.ArtifactProperties{
+		ArtifactBytes:  provenance,
+		PublicKeyBytes: [][]byte{certPem},
+	})
+}
+
+// newDsseEntry creates a ProposedEntry for dsse format.
+func newDsseEntry(certPem, provenance []byte) (models.ProposedEntry, error) {
+	if len(certPem) == 0 {
+		return nil, fmt.Errorf("no signing certificate found in intoto envelope")
+	}
+	return types.NewProposedEntry(context.Background(), dsse.KIND, dsse_v001.APIVERSION, types.ArtifactProperties{
+		ArtifactBytes:  provenance,
+		PublicKeyBytes: [][]byte{certPem},
+	})
+}
+
+// envelopeFromBytes reads a DSSE envelope from the given payload.
+func envelopeFromBytes(payload []byte) (*dsselib.Envelope, error) {
+	env := &dsselib.Envelope{}
+	err := json.Unmarshal(payload, env)
+	return env, err
 }
