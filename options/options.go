@@ -62,9 +62,6 @@ type CustomVerifierOpts struct {
 
 	// TufRootURL is the URL of a custom TUF repository for fetching the trusted root.
 	TufRootURL *string
-
-	// SourceURIPrefix is the required prefix for source URIs in the provenance.
-	SourceURIPrefix *string
 }
 
 // VSAOpts are the options for checking the VSA.

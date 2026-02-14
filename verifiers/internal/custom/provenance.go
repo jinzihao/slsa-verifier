@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	dsselib "github.com/secure-systems-lab/go-securesystemslib/dsse"
 
@@ -67,11 +66,7 @@ func verifyEnvAndCert(env *dsselib.Envelope,
 	}
 
 	// Verify source URI.
-	sourceURIPrefix := ""
-	if customOpts != nil && customOpts.SourceURIPrefix != nil {
-		sourceURIPrefix = *customOpts.SourceURIPrefix
-	}
-	if err := verifySourceURI(&att, provenanceOpts.ExpectedSourceURI, sourceURIPrefix); err != nil {
+	if err := verifySourceURI(&att, provenanceOpts.ExpectedSourceURI); err != nil {
 		return nil, nil, err
 	}
 
@@ -88,21 +83,13 @@ func verifyEnvAndCert(env *dsselib.Envelope,
 }
 
 // verifySourceURI verifies the source URI from the provenance matches the
-// expected source URI, optionally checking a prefix constraint.
-func verifySourceURI(att *attestation, expectedSourceURI, sourceURIPrefix string) error {
+// expected source URI.
+func verifySourceURI(att *attestation, expectedSourceURI string) error {
 	if expectedSourceURI == "" {
 		return nil
 	}
 
 	source := utils.NormalizeGitURI(expectedSourceURI)
-
-	// If a prefix is specified, check that the normalized source matches it.
-	if sourceURIPrefix != "" {
-		if !strings.HasPrefix(source, sourceURIPrefix) {
-			return fmt.Errorf("%w: source URI %q does not match required prefix %q",
-				serrors.ErrorMalformedURI, source, sourceURIPrefix)
-		}
-	}
 
 	// Verify source from resolved dependencies.
 	if len(att.Predicate.BuildDefinition.ResolvedDependencies) == 0 {

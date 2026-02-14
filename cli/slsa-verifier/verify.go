@@ -77,9 +77,6 @@ func verifyArtifactCmd() *cobra.Command {
 				if cmd.Flags().Changed("tuf-root-url") {
 					customOpts.TufRootURL = &o.TufRootURL
 				}
-				if cmd.Flags().Changed("source-uri-prefix") {
-					customOpts.SourceURIPrefix = &o.SourceURIPrefix
-				}
 				v.CustomOpts = customOpts
 			}
 

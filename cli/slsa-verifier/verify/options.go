@@ -47,7 +47,6 @@ type VerifyOptions struct {
 	BuildType                 string
 	TrustedRootPath           string
 	TufRootURL                string
-	SourceURIPrefix           string
 }
 
 var _ Interface = (*VerifyOptions)(nil)
@@ -99,9 +98,6 @@ func (o *VerifyOptions) AddFlags(cmd *cobra.Command) {
 
 	cmd.Flags().StringVar(&o.TufRootURL, "tuf-root-url", "",
 		"[optional] URL of a custom TUF repository for trusted root")
-
-	cmd.Flags().StringVar(&o.SourceURIPrefix, "source-uri-prefix", "",
-		"[optional] required prefix for source URIs (e.g. git+https://example.com/)")
 
 	cmd.MarkFlagsMutuallyExclusive("trusted-root", "tuf-root-url")
 }
